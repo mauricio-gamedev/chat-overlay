@@ -63,7 +63,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Kick chat em tempo real por cima dos jogos — V0.1");
+        subtitle.setText("Kick chat em tempo real por cima dos jogos — V0.2");
         subtitle.setTextColor(Color.rgb(170, 170, 180));
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(4), 0, dp(22));
@@ -105,12 +105,15 @@ public class MainActivity extends Activity {
 
         TextView info = new TextView(this);
         info.setText(
-                "Como usar:\n" +
-                "• Inicie o overlay e arraste pelo topo.\n" +
-                "• Quando estiver no lugar certo, fixe os toques.\n" +
-                "• Com os toques fixados, os comandos passam direto para o jogo.\n" +
-                "• Para destravar, volte neste app e toque no botão de fixar/destravar.\n\n" +
-                "A V0.1 mostra até 8 mensagens recentes e reconecta automaticamente se a conexão cair."
+                "V0.2:\n" +
+                "• Fundo do chat 100% transparente.\n" +
+                "• Cor real do nome recebida da Kick.\n" +
+                "• Badges de broadcaster, MOD, VIP, SUB, gifter e verificado.\n" +
+                "• Notificação fixa mantém o serviço ativo mesmo fechando a tela do app.\n" +
+                "• Pela notificação dá para fixar/destravar ou parar o overlay.\n" +
+                "• A posição do chat fica salva.\n\n" +
+                "Uso: inicie, arraste pelo título KICK CHAT e depois fixe os toques. " +
+                "Fixado, seus comandos passam direto para o jogo."
         );
         info.setTextColor(Color.rgb(175, 175, 185));
         info.setTextSize(13);
