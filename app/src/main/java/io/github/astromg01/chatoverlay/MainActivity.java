@@ -132,7 +132,7 @@ public class MainActivity extends Activity {
     private Button button(String text) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextAllCaps(false);
+        b.setAllCaps(false);
         b.setTextSize(15);
         return b;
     }
