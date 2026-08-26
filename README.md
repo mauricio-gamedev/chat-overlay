@@ -2,31 +2,34 @@
 
 Android overlay leve para acompanhar o chat público da Kick em tempo real por cima de jogos.
 
-## V0.1
+## V0.2
 
-- Conexão nativa ao chat público da Kick.
-- Sem Chrome e sem WebView para o chat.
-- Overlay Android com permissão `Aparecer sobre outros apps`.
-- Arrastar o painel pela barra superior.
-- Modo fixado/click-through para os toques passarem ao jogo.
-- Até 8 mensagens recentes.
-- Mensagens somem após 45 segundos.
-- Reconexão automática.
-- Serviço em primeiro plano para maior estabilidade durante gameplay.
+- Mantém o mesmo núcleo realtime validado na V0.1.
+- Conexão nativa ao chat público da Kick, sem Chrome e sem WebView.
+- Fundo do painel 100% transparente.
+- Cor real do nome recebida da identidade da Kick (`color` / `username_color`).
+- Badges compactos para broadcaster, MOD, VIP, SUB, gifter, verificado, founder e OG quando enviados no payload.
+- Sombra leve somente no texto para manter leitura sobre cenas claras e escuras.
+- Overlay arrastável e posição persistida.
+- Modo fixado/click-through para os toques passarem direto ao jogo.
+- Até 8 mensagens recentes, removidas automaticamente após 45 segundos.
+- Foreground Service persistente com `START_STICKY` e `stopWithTask=false`.
+- Notificação contínua com ações para fixar/destravar e parar o overlay.
+- Estado salvo para o serviço conseguir se reconstruir se o Android recriar o processo.
+- Chatroom ID em cache para evitar refazer chamadas HTTP a cada reconexão.
+- Reconexão com backoff curto e limite de 10 segundos.
+- Proteção contra callbacks de sockets antigos durante uma reconexão.
 - Build automático de APK via GitHub Actions.
 
 ## Uso
 
-1. Instale o APK de debug gerado pelo workflow **Build Android APK**.
-2. Abra o app e libere `Aparecer sobre outros apps`.
+1. Instale o APK gerado pelo workflow **Build Android APK**.
+2. Libere `Aparecer sobre outros apps` e notificações.
 3. Informe o nome do canal da Kick, sem `@`.
 4. Toque em **Iniciar overlay**.
-5. Arraste o chat para a posição desejada.
-6. Toque em **Fixar / destravar toques** antes de jogar para que os toques atravessem o painel.
-
-## Estado técnico
-
-O protótipo web anterior validou o chatroom do canal e o recebimento real de mensagens pelo WebSocket/Pusher da Kick. A V0.1 leva esse núcleo para Android nativo com OkHttp.
+5. Arraste pelo título `KICK CHAT` para posicionar.
+6. Fixe os toques antes de jogar. Fixado, o chat continua visível e os comandos passam ao jogo.
+7. Depois disso a tela principal do app pode ser fechada; a notificação mantém os controles principais disponíveis.
 
 ## Pacote Android
 
