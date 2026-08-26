@@ -7,20 +7,32 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ImageDecoder;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.graphics.drawable.AnimatedImageDrawable;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
-import android.text.style.BackgroundColorSpan;
+import android.text.style.DynamicDrawableSpan;
 import android.text.style.ForegroundColorSpan;
-import android.text.style.RelativeSizeSpan;
+import android.text.style.ImageSpan;
 import android.text.style.StyleSpan;
+import android.util.LruCache;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -33,7 +45,9 @@ import androidx.annotation.Nullable;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.IOException;
 import java.net.URLEncoder;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -45,6 +59,8 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -67,10 +83,33 @@ public class OverlayService extends Service {
             + "?protocol=7&client=js&version=8.4.0&flash=false";
     private static final int MAX_MESSAGES = 8;
     private static final long MESSAGE_LIFETIME_MS = 45_000L;
+    private static final Pattern EMOTE_PATTERN =
+            Pattern.compile("\\[emote:(\\d+):([^\\]]+)]");
+
+    private static final int[] FALLBACK_USER_COLORS = new int[]{
+            Color.rgb(83, 252, 24),
+            Color.rgb(107, 174, 255),
+            Color.rgb(196, 132, 255),
+            Color.rgb(255, 104, 196),
+            Color.rgb(255, 166, 77),
+            Color.rgb(64, 224, 208),
+            Color.rgb(255, 103, 103),
+            Color.rgb(246, 214, 76),
+            Color.rgb(91, 214, 156),
+            Color.rgb(140, 155, 255)
+    };
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService emoteIo = Executors.newFixedThreadPool(2);
     private final Deque<TextView> messageViews = new ArrayDeque<>();
+
+    private final LruCache<String, byte[]> emoteCache = new LruCache<String, byte[]>(6 * 1024) {
+        @Override
+        protected int sizeOf(String key, byte[] value) {
+            return Math.max(1, value.length / 1024);
+        }
+    };
 
     private SharedPreferences prefs;
     private OkHttpClient http;
@@ -191,7 +230,11 @@ public class OverlayService extends Service {
         title.setTextSize(10);
         title.setLetterSpacing(0.08f);
         title.setShadowLayer(4f, 0f, 1f, Color.BLACK);
-        header.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        header.addView(title, new LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+        ));
 
         statusView = new TextView(this);
         statusView.setText("CONECTANDO");
@@ -342,7 +385,10 @@ public class OverlayService extends Service {
     }
 
     private long resolveChatroom(String channel) throws Exception {
-        String safe = URLEncoder.encode(channel.toLowerCase(Locale.ROOT), StandardCharsets.UTF_8.toString());
+        String safe = URLEncoder.encode(
+                channel.toLowerCase(Locale.ROOT),
+                StandardCharsets.UTF_8.toString()
+        );
         String[] urls = new String[]{
                 "https://kick.com/api/v2/channels/" + safe + "/chatroom",
                 "https://kick.com/api/v1/channels/" + safe,
@@ -355,7 +401,7 @@ public class OverlayService extends Service {
                 Request req = new Request.Builder()
                         .url(url)
                         .header("Accept", "application/json")
-                        .header("User-Agent", "Mozilla/5.0 (Android) ChatOverlay/0.2")
+                        .header("User-Agent", "Mozilla/5.0 (Android) ChatOverlay/0.3")
                         .build();
 
                 try (Response response = http.newCall(req).execute()) {
@@ -389,7 +435,11 @@ public class OverlayService extends Service {
             }
 
             @Override
-            public void onFailure(WebSocket webSocket, Throwable t, @Nullable Response response) {
+            public void onFailure(
+                    WebSocket webSocket,
+                    Throwable t,
+                    @Nullable Response response
+            ) {
                 if (intentionalDisconnect || socket != webSocket) return;
                 socket = null;
                 main.post(() -> {
@@ -429,7 +479,9 @@ public class OverlayService extends Service {
                 reconnectAttempt = 0;
                 main.post(() -> {
                     setStatus(locked ? "FIXADO" : "AO VIVO",
-                            locked ? Color.rgb(190, 150, 255) : Color.rgb(83, 252, 24));
+                            locked
+                                    ? Color.rgb(190, 150, 255)
+                                    : Color.rgb(83, 252, 24));
                     updateNotification();
                 });
                 return;
@@ -459,14 +511,16 @@ public class OverlayService extends Service {
             List<BadgeSpec> badges = new ArrayList<>();
 
             if (actor != null) {
-                username = actor.optString("username",
-                        actor.optString("slug", actor.optString("name", username)));
+                username = actor.optString(
+                        "username",
+                        actor.optString("slug", actor.optString("name", username))
+                );
 
                 JSONObject identity = actor.optJSONObject("identity");
                 if (identity != null) {
-                    color = identity.optString("color", null);
+                    color = identity.optString("username_color", null);
                     if (color == null || color.isEmpty()) {
-                        color = identity.optString("username_color", null);
+                        color = identity.optString("color", null);
                     }
                     badges = parseBadges(identity, actor);
                 } else if (actor.optBoolean("is_verified", false)) {
@@ -478,7 +532,10 @@ public class OverlayService extends Service {
             if (content.isEmpty()) {
                 JSONObject message = data.optJSONObject("message");
                 if (message != null) {
-                    content = message.optString("message", message.optString("content", ""));
+                    content = message.optString(
+                            "message",
+                            message.optString("content", "")
+                    );
                 }
             }
 
@@ -487,7 +544,12 @@ public class OverlayService extends Service {
                 String finalContent = content;
                 String finalColor = color;
                 List<BadgeSpec> finalBadges = badges;
-                main.post(() -> addChatMessage(finalUsername, finalContent, finalColor, finalBadges));
+                main.post(() -> addChatMessage(
+                        finalUsername,
+                        finalContent,
+                        finalColor,
+                        finalBadges
+                ));
             }
 
         } catch (Exception ignored) {
@@ -528,13 +590,28 @@ public class OverlayService extends Service {
 
     private String normalizeBadgeType(String type) {
         if (type == null) return "";
-        return type.trim()
+        String normalized = type.trim()
                 .toLowerCase(Locale.ROOT)
                 .replace(' ', '_')
                 .replace('-', '_');
+
+        if (normalized.contains("broadcaster")) return "broadcaster";
+        if (normalized.contains("moderator") || normalized.equals("mod")) return "moderator";
+        if (normalized.contains("vip")) return "vip";
+        if (normalized.contains("subscriber") || normalized.equals("sub")) return "subscriber";
+        if (normalized.contains("gifter") || normalized.contains("gift")) return "gifter";
+        if (normalized.contains("verified")) return "verified";
+        if (normalized.contains("founder")) return "founder";
+        if (normalized.equals("og") || normalized.contains("original_gangster")) return "og";
+        return normalized;
     }
 
-    private void addChatMessage(String username, String message, String colorHex, List<BadgeSpec> badges) {
+    private void addChatMessage(
+            String username,
+            String message,
+            String colorHex,
+            List<BadgeSpec> badges
+    ) {
         if (!overlayAdded || messageContainer == null) return;
         removePlaceholder();
 
@@ -547,103 +624,277 @@ public class OverlayService extends Service {
             }
         }
 
+        int userColor = resolveUserColor(colorHex, username);
+
         int nameStart = text.length();
         text.append(username).append(":");
         int nameEnd = text.length();
+        text.setSpan(
+                new ForegroundColorSpan(userColor),
+                nameStart,
+                nameEnd,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        );
+        text.setSpan(
+                new StyleSpan(Typeface.BOLD),
+                nameStart,
+                nameEnd,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        );
 
-        int nameColor = Color.rgb(83, 252, 24);
-        if (colorHex != null && !colorHex.isEmpty()) {
-            try {
-                nameColor = Color.parseColor(colorHex);
-            } catch (Exception ignored) {
-            }
-        }
+        text.append(" ");
+        int messageStart = text.length();
+        text.append(message);
+        int messageEnd = text.length();
 
-        text.setSpan(new ForegroundColorSpan(nameColor), nameStart, nameEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        text.setSpan(new StyleSpan(Typeface.BOLD), nameStart, nameEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        text.append(" ").append(message);
+        int bodyColor = mixColor(userColor, Color.WHITE, 0.34f);
+        text.setSpan(
+                new ForegroundColorSpan(bodyColor),
+                messageStart,
+                messageEnd,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        );
 
-        tv.setText(text);
+        List<EmoteToken> emotes = findEmotes(message, messageStart);
+
+        tv.setText(text, TextView.BufferType.SPANNABLE);
         messageContainer.addView(tv);
         messageViews.addLast(tv);
 
         while (messageViews.size() > MAX_MESSAGES) {
             TextView old = messageViews.pollFirst();
             if (old != null && old.getParent() == messageContainer) {
+                stopAnimatedSpans(old);
                 messageContainer.removeView(old);
             }
         }
 
+        for (EmoteToken emote : emotes) {
+            loadEmote(tv, emote);
+        }
+
         main.postDelayed(() -> {
-            if (messageViews.remove(tv) && messageContainer != null && tv.getParent() == messageContainer) {
+            if (messageViews.remove(tv)
+                    && messageContainer != null
+                    && tv.getParent() == messageContainer) {
+                stopAnimatedSpans(tv);
                 messageContainer.removeView(tv);
             }
         }, MESSAGE_LIFETIME_MS);
     }
 
+    private int resolveUserColor(String colorHex, String username) {
+        if (colorHex != null && !colorHex.trim().isEmpty()) {
+            try {
+                return Color.parseColor(colorHex.trim());
+            } catch (Exception ignored) {
+            }
+        }
+
+        String stable = username == null ? "" : username.toLowerCase(Locale.ROOT);
+        int index = Math.floorMod(stable.hashCode(), FALLBACK_USER_COLORS.length);
+        return FALLBACK_USER_COLORS[index];
+    }
+
+    private int mixColor(int base, int target, float targetAmount) {
+        float p = Math.max(0f, Math.min(1f, targetAmount));
+        float q = 1f - p;
+        return Color.rgb(
+                Math.round(Color.red(base) * q + Color.red(target) * p),
+                Math.round(Color.green(base) * q + Color.green(target) * p),
+                Math.round(Color.blue(base) * q + Color.blue(target) * p)
+        );
+    }
+
+    private List<EmoteToken> findEmotes(String message, int absoluteOffset) {
+        List<EmoteToken> result = new ArrayList<>();
+        Matcher matcher = EMOTE_PATTERN.matcher(message);
+        while (matcher.find()) {
+            result.add(new EmoteToken(
+                    matcher.group(1),
+                    absoluteOffset + matcher.start(),
+                    absoluteOffset + matcher.end()
+            ));
+        }
+        return result;
+    }
+
+    private void loadEmote(TextView tv, EmoteToken token) {
+        byte[] cached = emoteCache.get(token.id);
+        if (cached != null) {
+            emoteIo.execute(() -> decodeAndApplyEmote(tv, token, cached));
+            return;
+        }
+
+        emoteIo.execute(() -> {
+            byte[] bytes = downloadEmote(token.id);
+            if (bytes == null || bytes.length == 0) return;
+            emoteCache.put(token.id, bytes);
+            decodeAndApplyEmote(tv, token, bytes);
+        });
+    }
+
+    @Nullable
+    private byte[] downloadEmote(String id) {
+        Request request = new Request.Builder()
+                .url("https://files.kick.com/emotes/" + id + "/fullsize")
+                .header("User-Agent", "Mozilla/5.0 (Android) ChatOverlay/0.3")
+                .build();
+
+        try (Response response = http.newCall(request).execute()) {
+            if (!response.isSuccessful() || response.body() == null) return null;
+            return response.body().bytes();
+        } catch (IOException ignored) {
+            return null;
+        }
+    }
+
+    private void decodeAndApplyEmote(TextView tv, EmoteToken token, byte[] bytes) {
+        Drawable drawable = decodeEmote(bytes);
+        if (drawable == null) return;
+
+        main.post(() -> {
+            if (tv.getParent() == null) return;
+            CharSequence current = tv.getText();
+            if (!(current instanceof Spannable)) return;
+
+            Spannable spannable = (Spannable) current;
+            if (token.start < 0 || token.end > spannable.length() || token.start >= token.end) {
+                return;
+            }
+
+            int height = dp(24);
+            int intrinsicW = drawable.getIntrinsicWidth();
+            int intrinsicH = drawable.getIntrinsicHeight();
+            int width = height;
+
+            if (intrinsicW > 0 && intrinsicH > 0) {
+                width = Math.round(height * (intrinsicW / (float) intrinsicH));
+                width = Math.max(dp(18), Math.min(width, dp(48)));
+            }
+
+            drawable.setBounds(0, 0, width, height);
+            drawable.setCallback(tv);
+
+            ImageSpan span = new ImageSpan(drawable, DynamicDrawableSpan.ALIGN_BOTTOM);
+            spannable.setSpan(
+                    span,
+                    token.start,
+                    token.end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            );
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    && drawable instanceof AnimatedImageDrawable) {
+                AnimatedImageDrawable animated = (AnimatedImageDrawable) drawable;
+                animated.setRepeatCount(AnimatedImageDrawable.REPEAT_INFINITE);
+                animated.start();
+            }
+
+            tv.invalidate();
+        });
+    }
+
+    @Nullable
+    private Drawable decodeEmote(byte[] bytes) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                ImageDecoder.Source source = ImageDecoder.createSource(ByteBuffer.wrap(bytes));
+                return ImageDecoder.decodeDrawable(source, (decoder, info, src) ->
+                        decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE));
+            }
+
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            if (bitmap == null) return null;
+            return new BitmapDrawable(getResources(), bitmap);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void stopAnimatedSpans(TextView tv) {
+        CharSequence current = tv.getText();
+        if (!(current instanceof Spanned)) return;
+        Spanned spanned = (Spanned) current;
+        ImageSpan[] spans = spanned.getSpans(0, spanned.length(), ImageSpan.class);
+        for (ImageSpan span : spans) {
+            Drawable drawable = span.getDrawable();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    && drawable instanceof AnimatedImageDrawable) {
+                ((AnimatedImageDrawable) drawable).stop();
+            }
+            drawable.setCallback(null);
+        }
+    }
+
     private void appendBadge(SpannableStringBuilder text, BadgeSpec badge) {
-        String label = badgeLabel(badge);
-        if (label.isEmpty()) return;
+        if (!isSupportedBadge(badge.type)) return;
 
         int start = text.length();
-        text.append(label);
+        text.append('\uFFFC');
         int end = text.length();
 
-        text.setSpan(new ForegroundColorSpan(Color.WHITE), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        text.setSpan(new BackgroundColorSpan(badgeColor(badge.type)), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        text.setSpan(new StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        text.setSpan(new RelativeSizeSpan(0.72f), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        BadgeIconDrawable drawable = new BadgeIconDrawable(badge.type, badgeColor(badge.type));
+        int size = dp(16);
+        drawable.setBounds(0, 0, size, size);
+        text.setSpan(
+                new ImageSpan(drawable, DynamicDrawableSpan.ALIGN_BOTTOM),
+                start,
+                end,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        );
+
+        if (badge.count > 0 && ("subscriber".equals(badge.type) || "gifter".equals(badge.type))) {
+            int countStart = text.length();
+            text.append(String.valueOf(badge.count));
+            int countEnd = text.length();
+            text.setSpan(
+                    new ForegroundColorSpan(mixColor(badgeColor(badge.type), Color.WHITE, 0.35f)),
+                    countStart,
+                    countEnd,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            );
+        }
+
         text.append(" ");
     }
 
-    private String badgeLabel(BadgeSpec badge) {
-        switch (badge.type) {
+    private boolean isSupportedBadge(String type) {
+        switch (type) {
             case "broadcaster":
-                return " MIC ";
             case "moderator":
-                return " MOD ";
             case "vip":
-                return " VIP ";
             case "subscriber":
-                return badge.count > 0 ? " SUB" + badge.count + " " : " SUB ";
-            case "sub_gifter":
             case "gifter":
-                return badge.count > 0 ? " GIFT" + badge.count + " " : " GIFT ";
             case "verified":
-                return " ✓ ";
             case "founder":
-                return " FOUND ";
             case "og":
-                return " OG ";
+                return true;
             default:
-                if (badge.type.length() <= 8) {
-                    return " " + badge.type.toUpperCase(Locale.ROOT) + " ";
-                }
-                return "";
+                return false;
         }
     }
 
     private int badgeColor(String type) {
         switch (type) {
             case "broadcaster":
-                return Color.rgb(160, 105, 255);
+                return Color.rgb(190, 92, 255);
             case "moderator":
                 return Color.rgb(83, 252, 24);
             case "vip":
-                return Color.rgb(255, 79, 216);
+                return Color.rgb(255, 72, 194);
             case "subscriber":
-                return Color.rgb(45, 180, 90);
-            case "sub_gifter":
+                return Color.rgb(93, 221, 122);
             case "gifter":
-                return Color.rgb(235, 145, 35);
+                return Color.rgb(255, 159, 67);
             case "verified":
-                return Color.rgb(35, 145, 235);
+                return Color.rgb(73, 165, 255);
             case "founder":
-                return Color.rgb(220, 165, 35);
+                return Color.rgb(255, 202, 58);
             case "og":
-                return Color.rgb(155, 95, 235);
+                return Color.rgb(171, 112, 255);
             default:
-                return Color.rgb(85, 90, 105);
+                return Color.LTGRAY;
         }
     }
 
@@ -692,12 +943,16 @@ public class OverlayService extends Service {
         if (intentionalDisconnect || currentChannel.isEmpty()) return;
         main.removeCallbacks(reconnectRunnable);
         reconnectAttempt = Math.min(reconnectAttempt + 1, 4);
-        long delay = Math.min(1500L * (1L << Math.max(0, reconnectAttempt - 1)), 10_000L);
+        long delay = Math.min(
+                1500L * (1L << Math.max(0, reconnectAttempt - 1)),
+                10_000L
+        );
         main.postDelayed(reconnectRunnable, delay);
     }
 
     private final Runnable reconnectRunnable = () -> {
-        if (!intentionalDisconnect && !currentChannel.isEmpty()
+        if (!intentionalDisconnect
+                && !currentChannel.isEmpty()
                 && prefs.getBoolean("service_active", false)) {
             connect(currentChannel);
         }
@@ -717,6 +972,9 @@ public class OverlayService extends Service {
 
     private void removeOverlay() {
         if (overlayAdded && windowManager != null && overlayRoot != null) {
+            for (TextView tv : messageViews) {
+                stopAnimatedSpans(tv);
+            }
             try {
                 windowManager.removeView(overlayRoot);
             } catch (Exception ignored) {
@@ -753,7 +1011,8 @@ public class OverlayService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
-        Intent toggleIntent = new Intent(this, OverlayService.class).setAction(ACTION_TOGGLE_LOCK);
+        Intent toggleIntent = new Intent(this, OverlayService.class)
+                .setAction(ACTION_TOGGLE_LOCK);
         PendingIntent togglePending = PendingIntent.getService(
                 this,
                 1,
@@ -761,7 +1020,8 @@ public class OverlayService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
-        Intent stopIntent = new Intent(this, OverlayService.class).setAction(ACTION_STOP);
+        Intent stopIntent = new Intent(this, OverlayService.class)
+                .setAction(ACTION_STOP);
         PendingIntent stopPending = PendingIntent.getService(
                 this,
                 2,
@@ -797,14 +1057,17 @@ public class OverlayService extends Service {
                 ).build());
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
+            builder.setForegroundServiceBehavior(
+                    Notification.FOREGROUND_SERVICE_IMMEDIATE
+            );
         }
 
         return builder.build();
     }
 
     private void updateNotification() {
-        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        NotificationManager manager =
+                (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         manager.notify(NOTIFICATION_ID, buildNotification());
     }
 
@@ -816,7 +1079,6 @@ public class OverlayService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        // O serviço em primeiro plano continua ativo mesmo se a tela principal do app for fechada.
         super.onTaskRemoved(rootIntent);
     }
 
@@ -827,6 +1089,8 @@ public class OverlayService extends Service {
         removeOverlay();
         main.removeCallbacksAndMessages(null);
         io.shutdownNow();
+        emoteIo.shutdownNow();
+        emoteCache.evictAll();
         if (http != null) {
             http.dispatcher().executorService().shutdown();
             http.connectionPool().evictAll();
@@ -836,6 +1100,221 @@ public class OverlayService extends Service {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private float dp(float value) {
+        return value * getResources().getDisplayMetrics().density;
+    }
+
+    private final class BadgeIconDrawable extends Drawable {
+        private final String type;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        BadgeIconDrawable(String type, int color) {
+            this.type = type;
+            paint.setColor(color);
+            paint.setStyle(Paint.Style.FILL);
+            stroke.setColor(color);
+            stroke.setStyle(Paint.Style.STROKE);
+            stroke.setStrokeWidth(dp(1.7f));
+            stroke.setStrokeCap(Paint.Cap.ROUND);
+            stroke.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            float cx = b.exactCenterX();
+            float cy = b.exactCenterY();
+            float w = b.width();
+            float h = b.height();
+
+            switch (type) {
+                case "broadcaster":
+                    drawMicrophone(canvas, cx, cy, w, h);
+                    break;
+                case "moderator":
+                    drawShield(canvas, cx, cy, w, h);
+                    break;
+                case "vip":
+                    drawStar(canvas, cx, cy, Math.min(w, h) * 0.44f, 5, paint);
+                    break;
+                case "subscriber":
+                    drawDiamond(canvas, cx, cy, w, h);
+                    break;
+                case "gifter":
+                    drawGift(canvas, cx, cy, w, h);
+                    break;
+                case "verified":
+                    drawVerified(canvas, cx, cy, w, h);
+                    break;
+                case "founder":
+                    drawCrown(canvas, cx, cy, w, h);
+                    break;
+                case "og":
+                    drawOg(canvas, cx, cy, w, h);
+                    break;
+                default:
+                    canvas.drawCircle(cx, cy, Math.min(w, h) * 0.22f, paint);
+                    break;
+            }
+        }
+
+        private void drawMicrophone(Canvas canvas, float cx, float cy, float w, float h) {
+            float headW = w * 0.30f;
+            float headH = h * 0.48f;
+            Rect head = new Rect(
+                    Math.round(cx - headW / 2f),
+                    Math.round(cy - headH / 2f - h * 0.08f),
+                    Math.round(cx + headW / 2f),
+                    Math.round(cy + headH / 2f - h * 0.08f)
+            );
+            canvas.drawRoundRect(
+                    head.left,
+                    head.top,
+                    head.right,
+                    head.bottom,
+                    headW / 2f,
+                    headW / 2f,
+                    paint
+            );
+            Path cup = new Path();
+            cup.moveTo(cx - w * 0.24f, cy - h * 0.02f);
+            cup.quadTo(cx - w * 0.22f, cy + h * 0.28f, cx, cy + h * 0.28f);
+            cup.quadTo(cx + w * 0.22f, cy + h * 0.28f, cx + w * 0.24f, cy - h * 0.02f);
+            canvas.drawPath(cup, stroke);
+            canvas.drawLine(cx, cy + h * 0.28f, cx, cy + h * 0.43f, stroke);
+            canvas.drawLine(cx - w * 0.15f, cy + h * 0.43f, cx + w * 0.15f, cy + h * 0.43f, stroke);
+        }
+
+        private void drawShield(Canvas canvas, float cx, float cy, float w, float h) {
+            Path p = new Path();
+            p.moveTo(cx, cy - h * 0.42f);
+            p.lineTo(cx + w * 0.34f, cy - h * 0.25f);
+            p.lineTo(cx + w * 0.28f, cy + h * 0.16f);
+            p.quadTo(cx, cy + h * 0.43f, cx, cy + h * 0.43f);
+            p.quadTo(cx - w * 0.28f, cy + h * 0.16f, cx - w * 0.28f, cy + h * 0.16f);
+            p.lineTo(cx - w * 0.34f, cy - h * 0.25f);
+            p.close();
+            canvas.drawPath(p, paint);
+        }
+
+        private void drawDiamond(Canvas canvas, float cx, float cy, float w, float h) {
+            Path p = new Path();
+            p.moveTo(cx, cy - h * 0.40f);
+            p.lineTo(cx + w * 0.38f, cy);
+            p.lineTo(cx, cy + h * 0.40f);
+            p.lineTo(cx - w * 0.38f, cy);
+            p.close();
+            canvas.drawPath(p, paint);
+        }
+
+        private void drawGift(Canvas canvas, float cx, float cy, float w, float h) {
+            canvas.drawRect(
+                    cx - w * 0.34f,
+                    cy - h * 0.08f,
+                    cx + w * 0.34f,
+                    cy + h * 0.34f,
+                    paint
+            );
+            canvas.drawRect(
+                    cx - w * 0.40f,
+                    cy - h * 0.20f,
+                    cx + w * 0.40f,
+                    cy - h * 0.05f,
+                    paint
+            );
+            Paint cut = new Paint(Paint.ANTI_ALIAS_FLAG);
+            cut.setColor(Color.argb(185, 0, 0, 0));
+            canvas.drawRect(cx - w * 0.035f, cy - h * 0.20f, cx + w * 0.035f, cy + h * 0.34f, cut);
+            canvas.drawCircle(cx - w * 0.11f, cy - h * 0.29f, w * 0.10f, stroke);
+            canvas.drawCircle(cx + w * 0.11f, cy - h * 0.29f, w * 0.10f, stroke);
+        }
+
+        private void drawVerified(Canvas canvas, float cx, float cy, float w, float h) {
+            canvas.drawCircle(cx, cy, Math.min(w, h) * 0.42f, paint);
+            Paint check = new Paint(Paint.ANTI_ALIAS_FLAG);
+            check.setColor(Color.WHITE);
+            check.setStyle(Paint.Style.STROKE);
+            check.setStrokeCap(Paint.Cap.ROUND);
+            check.setStrokeJoin(Paint.Join.ROUND);
+            check.setStrokeWidth(dp(1.8f));
+            Path p = new Path();
+            p.moveTo(cx - w * 0.20f, cy);
+            p.lineTo(cx - w * 0.04f, cy + h * 0.16f);
+            p.lineTo(cx + w * 0.23f, cy - h * 0.17f);
+            canvas.drawPath(p, check);
+        }
+
+        private void drawCrown(Canvas canvas, float cx, float cy, float w, float h) {
+            Path p = new Path();
+            p.moveTo(cx - w * 0.40f, cy + h * 0.25f);
+            p.lineTo(cx - w * 0.34f, cy - h * 0.27f);
+            p.lineTo(cx - w * 0.10f, cy - h * 0.05f);
+            p.lineTo(cx, cy - h * 0.37f);
+            p.lineTo(cx + w * 0.12f, cy - h * 0.05f);
+            p.lineTo(cx + w * 0.36f, cy - h * 0.27f);
+            p.lineTo(cx + w * 0.40f, cy + h * 0.25f);
+            p.close();
+            canvas.drawPath(p, paint);
+        }
+
+        private void drawOg(Canvas canvas, float cx, float cy, float w, float h) {
+            canvas.drawCircle(cx, cy, Math.min(w, h) * 0.40f, stroke);
+            canvas.drawCircle(cx, cy, Math.min(w, h) * 0.16f, paint);
+        }
+
+        private void drawStar(
+                Canvas canvas,
+                float cx,
+                float cy,
+                float outer,
+                int points,
+                Paint starPaint
+        ) {
+            float inner = outer * 0.46f;
+            Path path = new Path();
+            for (int i = 0; i < points * 2; i++) {
+                double angle = -Math.PI / 2 + i * Math.PI / points;
+                float radius = (i % 2 == 0) ? outer : inner;
+                float x = cx + (float) Math.cos(angle) * radius;
+                float y = cy + (float) Math.sin(angle) * radius;
+                if (i == 0) path.moveTo(x, y);
+                else path.lineTo(x, y);
+            }
+            path.close();
+            canvas.drawPath(path, starPaint);
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            paint.setAlpha(alpha);
+            stroke.setAlpha(alpha);
+        }
+
+        @Override
+        public void setColorFilter(@Nullable android.graphics.ColorFilter colorFilter) {
+            paint.setColorFilter(colorFilter);
+            stroke.setColorFilter(colorFilter);
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
+    }
+
+    private static final class EmoteToken {
+        final String id;
+        final int start;
+        final int end;
+
+        EmoteToken(String id, int start, int end) {
+            this.id = id;
+            this.start = start;
+            this.end = end;
+        }
     }
 
     private static final class BadgeSpec {
