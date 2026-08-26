@@ -63,7 +63,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Kick chat em tempo real por cima dos jogos — V0.2");
+        subtitle.setText("Kick chat em tempo real por cima dos jogos — V0.3");
         subtitle.setTextColor(Color.rgb(170, 170, 180));
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(4), 0, dp(22));
@@ -105,13 +105,14 @@ public class MainActivity extends Activity {
 
         TextView info = new TextView(this);
         info.setText(
-                "V0.2:\n" +
-                "• Fundo do chat 100% transparente.\n" +
-                "• Cor real do nome recebida da Kick.\n" +
-                "• Badges de broadcaster, MOD, VIP, SUB, gifter e verificado.\n" +
-                "• Notificação fixa mantém o serviço ativo mesmo fechando a tela do app.\n" +
-                "• Pela notificação dá para fixar/destravar ou parar o overlay.\n" +
-                "• A posição do chat fica salva.\n\n" +
+                "V0.3:\n" +
+                "• Emotes da Kick aparecem dentro das mensagens.\n" +
+                "• Emotes animados continuam animados em Android 9+.\n" +
+                "• Nome usa a cor enviada pela Kick; se ela faltar, cada usuário recebe uma cor estável.\n" +
+                "• A mensagem acompanha uma versão mais clara da cor do usuário para facilitar leitura.\n" +
+                "• Badges agora são ícones visuais, sem caixas com nomes.\n" +
+                "• Fundo continua 100% transparente.\n" +
+                "• Notificação fixa, posição salva e realtime da V0.2 foram preservados.\n\n" +
                 "Uso: inicie, arraste pelo título KICK CHAT e depois fixe os toques. " +
                 "Fixado, seus comandos passam direto para o jogo."
         );
